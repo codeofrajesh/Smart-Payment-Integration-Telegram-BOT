@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+venv/
+ENV/
+env/
+
+# Database files (contain sensitive user data)
+data/
+*.json
+
+# Logs
+logs/
+*.log
+
+# Configuration (contains secrets)
+
+# Docker
+.dockerignore
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Backups
+*.bak
+backup/
+*.tar.gz
+*.zip
+
+# Environment variables
+.env
+.env.local

@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  telegram-bot:
+    build: .
+    container_name: semi_auto_membership_bot
+    restart: unless-stopped
+    
+    env_file:
+      - .env
+
+    # Persistent volumes
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      #- ./config.py:/app/config.py
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    
+    # Logging
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
