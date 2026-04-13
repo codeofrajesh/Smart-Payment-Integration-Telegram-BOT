@@ -10,6 +10,7 @@ import string
 import aiohttp
 import re
 from datetime import datetime, timedelta
+from telegram.error import BadRequest
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -517,6 +518,59 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=InlineKeyboardMarkup(fallback_kb)
             )            
 
+async def ask_reset_revenue(query, context, rev_type):
+    """Shows the safety confirmation warning screen"""
+    method_name = "Razorpay" if rev_type == 'gateway' else "UPI"
+    
+    msg = (
+        f"⚠️ *WARNING: RESET {method_name.upper()} REVENUE* ⚠️\n\n"
+        f"Are you absolutely sure you want to reset your {method_name} earnings to ₹0?\n\n"
+        f"_This will hide past earnings from the dashboard, but will NOT affect users' premium access._"
+    )
+    
+    keyboard = [
+        [InlineKeyboardButton("🚨 YES, RESET TO ₹0", callback_data=f"confirm_reset_{rev_type}")],
+        [InlineKeyboardButton("🔙 Cancel", callback_data=f"stats_rev_{rev_type}")] # Goes back to stats
+    ]
+    
+    try:
+        await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+    except BadRequest as e:
+        if "Message is not modified" in str(e):
+            # The user double-clicked the button. Just ignore it!
+            pass
+        else:
+            # It's a real error, print it
+            print(f"Error showing reset warning: {e}")
+
+async def execute_reset_revenue(query, context, rev_type):
+    """Actually flags the orders in the database and resets the counter"""
+    count = 0
+    
+    # Loop through all orders and flag them as financially cleared
+    for oid, order in orders_db.items():
+        if order.get('status') in ['approved', 'active']:
+            is_rzp = order.get('method') == 'razorpay'
+            
+            # If we are resetting Gateway, only flag razorpay orders. If UPI, flag non-razorpay.
+            if (rev_type == 'gateway' and is_rzp) or (rev_type == 'upi' and not is_rzp):
+                if not order.get('revenue_cleared', False):
+                    orders_db[oid]['revenue_cleared'] = True
+                    count += 1
+    
+    # Only save if we actually cleared something
+    if count > 0:
+        save_db(ORDERS_FILE, orders_db)
+        
+    method_name = "Razorpay" if rev_type == 'gateway' else "UPI"
+    
+    # Show a smooth popup alert
+    await query.answer(f"✅ {method_name} Revenue reset to ₹0! ({count} orders cleared)", show_alert=True)
+    
+    # Bounce them back to the stats page to see the fresh ₹0
+    await show_stats_revenue(query, context, rev_type)
+
+
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         #Handle buttons
 
@@ -740,15 +794,7 @@ Delete User Data:
     elif query.data.startswith('deck_reject_'):
         order_id = query.data.replace('deck_reject_', '')
         await handle_deck_action(update, context, order_id, 'reject')
-
-    elif query.data == 'admin_toggle_cache':
-        current_state = settings_db.get('cache_translations', True)
-        settings_db['cache_translations'] = not current_state
-        save_db(SETTINGS_FILE, settings_db)
-        
-        new_state = "ON" if not current_state else "OFF"
-        await query.answer(f"Translation Cache is now {new_state}!", show_alert=True)
-        await show_dashboard(update, context)    
+   
 
     elif query.data.startswith('lang_page_'):
         page = int(query.data.split('_')[2])
@@ -763,6 +809,14 @@ Delete User Data:
         users_db[user_id]['lang'] = selected_lang
         save_db(USERS_FILE, users_db)
         await start(update, context)
+
+    elif query.data.startswith('reset_rev_'):
+        rev_type = query.data.replace('reset_rev_', '')
+        await ask_reset_revenue(query, context, rev_type)
+        
+    elif query.data.startswith('confirm_reset_'):
+        rev_type = query.data.replace('confirm_reset_', '')
+        await execute_reset_revenue(query, context, rev_type)    
 
 async def show_how_it_works(query, context):
     #Show instructions
@@ -1180,6 +1234,14 @@ async def choose_payment_method(query, context, plan_id):
         error_msg = await smart_translate("❌ This plan is no longer available!", user_lang)
         await query.answer(error_msg, show_alert=True)
         return
+
+    upi_enabled = settings_db.get('upi_enabled', True)
+    gateway_enabled = settings_db.get('gateway_enabled', True)
+
+    if not upi_enabled and not gateway_enabled:
+        err_msg = await smart_translate("❌ Payments are temporarily disabled. Please contact the admin.", user_lang)
+        await query.answer(err_msg, show_alert=True)
+        return
         
     plan = plans_db[plan_id]
     duration = plan.get('duration', 'Lifetime')
@@ -1194,16 +1256,20 @@ async def choose_payment_method(query, context, plan_id):
         f"👇 <i>Please choose your preferred payment method:</i>"
     )
     
-    final_message = await smart_translate(message, user_lang)
-    btn_direct = await smart_translate("🏦 Pay Direct (UPI / QR)", user_lang)
-    btn_gateway = await smart_translate("💳 Pay via Gateway (Card / NetBanking)", user_lang)
-    btn_cancel = await smart_translate("❌ Cancel", user_lang)
+    raw_keyboard = []
 
-    raw_keyboard = [
-        [{"text": btn_direct, "callback_data": f"pay_direct_{plan_id}", "style": "primary"}],
-        [{"text": btn_gateway, "callback_data": f"pay_gateway_{plan_id}", "style": "success"}],
-        [{"text": btn_cancel, "callback_data": "join_membership", "style": "danger"}]
-    ]
+    if upi_enabled:
+        btn_direct = await smart_translate("🏦 Pay Direct (UPI / QR)", user_lang)
+        raw_keyboard.append([{"text": btn_direct, "callback_data": f"pay_direct_{plan_id}", "style": "primary"}])
+
+    if gateway_enabled:
+        btn_gateway = await smart_translate("💳 Pay via Gateway (Card / NetBanking)", user_lang)
+        raw_keyboard.append([{"text": btn_gateway, "callback_data": f"pay_gateway_{plan_id}", "style": "success"}])
+
+    btn_cancel = await smart_translate("❌ Cancel", user_lang)
+    raw_keyboard.append([{"text": btn_cancel, "callback_data": "join_membership", "style": "danger"}])
+
+    final_message = await smart_translate(message, user_lang)
     
     try:
         await send_colored_settings(
@@ -1407,6 +1473,18 @@ async def show_payment_screen(query, context, order_id, upi_idx=0):
     user_display = f"{order.get('first_name', 'User')}{username_display}"
     current_time = datetime.now().strftime('%d %b %Y, %I:%M %p')
     plan_name = order.get('plan_name', 'Premium Membership')
+
+    default_instructions = (
+        "<b>📱 INSTRUCTIONS:</b>\n\n"
+        "1️⃣ Scan the QR code with any UPI app\n"
+        "2️⃣ Pay the exact amount shown above\n"
+        "3️⃣ Take a screenshot of the successful payment\n"
+        "4️⃣ Click the \"✅ I Have Paid\" button below\n"
+        "5️⃣ Send the screenshot to the bot\n\n"
+        "⏳ <b>Approval Time:</b> Usually 1-2 hours"
+    )
+    
+    custom_instructions = settings_db.get('qr_inst_msg', default_instructions)
     
     # --- Main Message ---
     payment_message = f"""
@@ -1418,16 +1496,7 @@ async def show_payment_screen(query, context, order_id, upi_idx=0):
 💰 <b>Amount:</b> ₹{order['amount']}
 ⏰ <b>Time:</b> {current_time}</blockquote>
 
-<b>📱 INSTRUCTIONS:</b>
-
-1️⃣ Scan QR code with UPI app
-2️⃣ Pay ₹{order['amount']}
-3️⃣ Take screenshot of payment
-4️⃣ Click "✅ I Have Paid" below
-5️⃣ Send screenshot to bot
-6️⃣ Wait for admin approval
-
-⏳ <b>Approval Time:</b> 1-2 hours
+{custom_instructions}
 
 🏦 <b>UPI ID:</b> <code>{current_upi}</code>
 

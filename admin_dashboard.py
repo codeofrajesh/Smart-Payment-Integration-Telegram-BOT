@@ -128,7 +128,7 @@ async def show_stats_revenue(query, context, menu_type: str):
     elif menu_type == 'upi':
         upi_totals = {}
         for oid, order in orders_db.items():
-            if order.get('status') in ['approved', 'active'] and (order.get('selected_upi') or order.get('screenshot_uploaded') or order.get('qr_msg_id')):
+            if order.get('status') in ['approved', 'active'] and not order.get('revenue_cleared', False) and (order.get('screenshot_uploaded') or order.get('qr_msg_id')):
                 
                 # Safe Math
                 try:
@@ -145,17 +145,23 @@ async def show_stats_revenue(query, context, menu_type: str):
         for upi, total in upi_totals.items():
             msg += f"<blockquote>💳 <b>{upi}</b>\n💰 Total: ₹{total:.2f}</blockquote>\n"
             
-        keyboard = [[{"text": "🔙 Back", "callback_data": "stats_revenue", "style": "danger"}]]
+        keyboard = [
+            [{"text": "🔄 Reset UPI Revenue", "callback_data": "reset_rev_upi", "style": "primary"}],
+            [{"text": "🔙 Back", "callback_data": "stats_revenue", "style": "danger"}]
+        ]
         
     elif menu_type == 'gateway':
         total = 0
         for oid, order in orders_db.items():
-            if order.get('status') in ['approved', 'active'] and ('status_msg_id' in order or 'gateway_menu_msg_id' in order):
+            if order.get('status') in ['approved', 'active'] and not order.get('revenue_cleared', False)  and ('status_msg_id' in order or 'gateway_menu_msg_id' in order):
                 total += float(order.get('amount', 0))
                 
         net = total * 0.98
         msg = f"💳 <b>RAZORPAY EARNINGS</b>\n\n<blockquote>💵 <b>Gross Processed:</b> ₹{total:.2f}\n📉 <b>Gateway Fee (2%):</b> -₹{(total * 0.02):.2f}\n💰 <b>Net Earned:</b> ₹{net:.2f}</blockquote>"
-        keyboard = [[{"text": "🔙 Back", "callback_data": "stats_revenue", "style": "danger"}]]
+        keyboard = [
+            [{"text": "🔄 Reset Gateway Revenue", "callback_data": "reset_rev_gateway", "style": "primary"}],
+            [{"text": "🔙 Back", "callback_data": "stats_revenue", "style": "danger"}]
+        ]
 
     await send_colored_settings(TELEGRAM_BOT_TOKEN, query.message.chat_id, msg, keyboard, query.message.message_id)
 

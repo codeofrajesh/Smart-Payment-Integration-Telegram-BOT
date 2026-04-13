@@ -2,7 +2,7 @@ import time
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from config import ADMIN_CHAT_ID
-from database import settings_db, plans_db, save_db, SETTINGS_FILE, PLANS_FILE
+from database import settings_db, plans_db, save_db, SETTINGS_FILE, PLANS_FILE, translations_db, TRANSLATIONS_FILE
 from api_utils import send_colored_settings, send_colored_photo
 from config import TELEGRAM_BOT_TOKEN, ADMIN_CHAT_ID
 
@@ -108,6 +108,7 @@ async def show_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     upi_display = f"{len(upi_ids)} Active" if upi_ids else "❌ None Set"
     rzp_mode = settings_db.get('rzp_mode', 'Automatic').title()
+    cache_state = "ON" if settings_db.get('cache_translations', True) else "OFF"
     msg = f"""🎛️ <b>ADMIN CONTROL PANEL</b>
 
 <blockquote>🏦 <b>UPI IDs:</b> {upi_display}
@@ -134,7 +135,7 @@ async def show_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
             {"text": "📊 Open Live Analytics", "callback_data": "stats_main", "style": "success"}
         ],
         [
-            {"text": "💾 Toggle Translation Cache", "callback_data": "admin_toggle_cache", "style": "primary"}
+            {"text": f"💾 Translation Cache: {cache_state}", "callback_data": "admin_toggle_cache", "style": "primary"}
         ],
         [
             {"text": "❌ Close Panel", "callback_data": "admin_close", "style": "danger"}
@@ -166,12 +167,14 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
     elif query.data == 'admin_edit_upi':
         upi_ids = settings_db.get('upi_ids', [])
         keyboard = []
-        
+        upi_enabled = settings_db.get('upi_enabled', True)
+        status_text = "🟢 ON" if upi_enabled else "🔴OFF"
         # List all current UPIs with a Delete button
         for i, upi in enumerate(upi_ids):
             keyboard.append([InlineKeyboardButton(f"❌ Delete: {upi}", callback_data=f'admin_del_upi_{i}')])
             
         keyboard.append([InlineKeyboardButton("➕ Add New UPI", callback_data='admin_add_upi')])
+        keyboard.append([InlineKeyboardButton(f"👁️ UPI Option: {status_text}", callback_data='admin_toggle_upi')])
         keyboard.append([InlineKeyboardButton("🔙 Back to Dashboard", callback_data='admin_dash')])
         
         await query.edit_message_text(
@@ -230,6 +233,8 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
         if p_id in plans_db:
             del plans_db[p_id]
             save_db(PLANS_FILE, plans_db)
+            translations_db.clear()
+            save_db(TRANSLATIONS_FILE, translations_db)
             await query.answer("✅ Plan Deleted!")
         else:
             await query.answer("❌ Plan not found!", show_alert=True)
@@ -253,6 +258,7 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
             [InlineKeyboardButton("📝 Edit Welcome TEXT", callback_data='admin_msg_welcome')],
             [InlineKeyboardButton("📸 Edit Welcome IMAGE", callback_data='admin_welcome_image')],
             [InlineKeyboardButton("✅ Edit Approval Msg", callback_data='admin_msg_approval')],
+            [InlineKeyboardButton("📜 Edit QR Instructions", callback_data='admin_msg_qr_inst')],
             [InlineKeyboardButton("🔙 Back", callback_data='admin_dash')]
         ]
         await query.edit_message_text("💬 *Which message do you want to edit?*", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
@@ -302,6 +308,8 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
         display_mode = "Automatic" if current_mode == 'auto' else "Manual"
         
         key_status = "✅ Set" if settings_db.get('rzp_key_id') else "❌ Not Set"
+        gateway_enabled = settings_db.get('gateway_enabled', True)
+        status_text = "🟢 ON" if gateway_enabled else "🔴 OFF"
         
         msg = (
             f"💳 *PAYMENT GATEWAY SETTINGS*\n\n"
@@ -313,11 +321,70 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
         
         kb = [
             [InlineKeyboardButton("🔑 Set/Edit API Keys", callback_data='admin_rzp_keys')],
-            # 👇 Here is the dynamic button!
+            [InlineKeyboardButton(f"👁️ Gateway Option: {status_text}", callback_data='admin_toggle_gateway')],
             [InlineKeyboardButton(f"🔄 Mode: {display_mode}", callback_data='admin_rzp_toggle')],
             [InlineKeyboardButton("🔙 Back to Dashboard", callback_data='admin_dash')]
         ]
         await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+
+    elif query.data == 'admin_toggle_upi':
+        current = settings_db.get('upi_enabled', True)
+        settings_db['upi_enabled'] = not current
+        save_db(SETTINGS_FILE, settings_db)
+        
+        state_msg = "VISIBLE" if not current else "HIDDEN"
+        await query.answer(f"✅ UPI option is now {state_msg} at checkout!", show_alert=True)
+        
+        # 👇 THE FIX: Manually redraw the menu instead of mutating query.data
+        upi_ids = settings_db.get('upi_ids', [])
+        upi_enabled = settings_db.get('upi_enabled', True)
+        status_text = "🟢 VISIBLE" if upi_enabled else "🔴 HIDDEN"
+        
+        keyboard = []
+        for i, upi in enumerate(upi_ids):
+            keyboard.append([InlineKeyboardButton(f"❌ Delete: {upi}", callback_data=f'admin_del_upi_{i}')])
+            
+        keyboard.append([InlineKeyboardButton("➕ Add New UPI", callback_data='admin_add_upi')])
+        keyboard.append([InlineKeyboardButton(f"👁️ UPI Option: {status_text}", callback_data='admin_toggle_upi')])
+        keyboard.append([InlineKeyboardButton("🔙 Back to Dashboard", callback_data='admin_dash')])
+        
+        await query.edit_message_text(
+            "🏦 *UPI MANAGEMENT*\n\nClick a UPI ID to delete it, add a new one, or toggle visibility at checkout.",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='Markdown'
+        )
+        
+    elif query.data == 'admin_toggle_gateway':
+        current = settings_db.get('gateway_enabled', True)
+        settings_db['gateway_enabled'] = not current
+        save_db(SETTINGS_FILE, settings_db)
+        
+        state_msg = "VISIBLE" if not current else "HIDDEN"
+        await query.answer(f"✅ Gateway option is now {state_msg} at checkout!", show_alert=True)
+        
+        # 👇 THE FIX: Manually redraw the menu instead of mutating query.data
+        current_mode = settings_db.get('rzp_mode', 'manual').lower()
+        display_mode = "Automatic" if current_mode == 'auto' else "Manual"
+        key_status = "✅ Set" if settings_db.get('rzp_key_id') else "❌ Not Set"
+        
+        gateway_enabled = settings_db.get('gateway_enabled', True)
+        status_text = "🟢 VISIBLE" if gateway_enabled else "🔴 HIDDEN"
+        
+        msg = (
+            f"💳 *PAYMENT GATEWAY SETTINGS*\n\n"
+            f"🔑 *API Keys:* {key_status}\n"
+            f"⚙️ *Current Mode:* {display_mode.upper()}\n\n"
+            f"_Manual = Admin must still verify the gateway payment._\n"
+            f"_Auto = Bot auto-approves and sends link instantly._"
+        )
+        
+        kb = [
+            [InlineKeyboardButton("🔑 Set/Edit API Keys", callback_data='admin_rzp_keys')],
+            [InlineKeyboardButton(f"🔄 Mode: {display_mode}", callback_data='admin_rzp_toggle')],
+            [InlineKeyboardButton(f"👁️ Gateway Option: {status_text}", callback_data='admin_toggle_gateway')],
+            [InlineKeyboardButton("🔙 Back to Dashboard", callback_data='admin_dash')]
+        ]
+        await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')    
         
     elif query.data == 'admin_rzp_toggle':
         current_mode = settings_db.get('rzp_mode', 'manual').lower()
@@ -352,6 +419,15 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Cancel", callback_data='admin_gateway')]]),
             parse_mode='Markdown'
         )    
+
+    elif query.data == 'admin_toggle_cache':
+        current_state = settings_db.get('cache_translations', True)
+        settings_db['cache_translations'] = not current_state
+        save_db(SETTINGS_FILE, settings_db)
+        
+        new_state = "ON" if not current_state else "OFF"
+        await query.answer(f"Translation Cache is now {new_state}!", show_alert=True)
+        await show_dashboard(update, context)    
 
 async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Catches text inputs for changing settings"""
@@ -429,12 +505,10 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     elif state == 'waiting_for_plan_duration':
-        # ❌ REMOVED the text.isdigit() check! We WANT letters now.
         
-        display_text = text.strip() # Just take exactly what they typed
+        display_text = text.strip() 
         
         context.user_data['temp_plan_duration'] = display_text 
-        # ❌ REMOVED context.user_data['temp_plan_duration_days'] completely!
         
         context.user_data['admin_state'] = 'waiting_for_plan_price'
         await update.message.reply_text(
@@ -458,13 +532,19 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "price": int(text)
         }
         save_db(PLANS_FILE, plans_db)
+        translations_db.clear()
+        save_db(TRANSLATIONS_FILE, translations_db)
         await update.message.reply_text(f"✅ Plan '{context.user_data['temp_plan_name']}' added successfully for ₹{text}!")
         
     elif state.startswith('waiting_for_msg_'):
         msg_type = state.replace('waiting_for_msg_', '')
         settings_db[f"{msg_type}_msg"] = extract_bulletproof_html(update.message)
         save_db(SETTINGS_FILE, settings_db)
-        await update.message.reply_text(f"✅ {msg_type.title()} message updated!")
+        translations_db.clear()
+        save_db(TRANSLATIONS_FILE, translations_db)
+        display_name = msg_type.replace('_', ' ').title()
+        if display_name == "Qr Inst": display_name = "QR Instructions"
+        await update.message.reply_text(f"✅ {display_name} message updated!")
 
     elif state == 'waiting_for_welcome_image':
         if not update.message.photo and not update.message.document:
