@@ -19,6 +19,7 @@ from telegram.ext import (
     MessageHandler,
     filters,
     ContextTypes,
+    ChatJoinRequestHandler,
 )
 from database import (
     orders_db, members_db, invite_links_db, settings_db, plans_db, users_db,
@@ -199,7 +200,7 @@ async def create_single_use_invite_link(context, user_id, username, order_id):
         invite_link = await context.bot.create_chat_invite_link(
             chat_id=target_channel,
             expire_date=int(expiry_date.timestamp()),
-            member_limit=1,
+            creates_join_request=True,
             name=f"User_{user_id}_{int(time.time())}"
         )
         
@@ -2070,21 +2071,6 @@ async def process_approval(context, order_id, message_id_to_edit=None):
             plan_duration_str = p.get('duration', 'Lifetime')
             time_delta = parse_plan_duration(plan_duration_str)
             break
-
-    if time_delta:
-        expiry_date = datetime.now() + time_delta
-        orders_db[order_id]['expires_at'] = expiry_date.isoformat()
-        
-        if context.job_queue:
-            context.job_queue.run_once(
-                auto_expire_task, 
-                when=time_delta, # Waits exactly the calculated time!
-                data={'user_id': user_id, 'order_id': order_id},
-                name=f"auto_expire_{order_id}"
-            )
-            logger.info(f"⏰ Timer set! Order {order_id} will auto-expire at {expiry_date.strftime('%I:%M %p')}")
-    else:
-        orders_db[order_id]['expires_at'] = "Lifetime"
         
     save_db(ORDERS_FILE, orders_db)
     custom_admin_msg = settings_db.get('approval_msg', "")
@@ -2133,6 +2119,121 @@ async def process_approval(context, order_id, message_id_to_edit=None):
             await context.bot.send_message(chat_id=user_id, text=full_msg, reply_markup=fallback_kb, parse_mode='HTML')
 
     return True
+
+async def handle_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """The Bouncer: Approves user, rejects ghosts, and STARTS THE CLOCK"""
+    request = update.chat_join_request
+    user_id = str(request.from_user.id)
+
+    # 1. Find the user's un-punched VIP ticket
+    target_order_id = None
+    for oid, order in orders_db.items():
+        # Check for 'approved' status (meaning they paid but haven't entered yet)
+        if str(order.get('user_id')) == user_id and order.get('status') == 'approved':
+            target_order_id = oid
+            break
+
+    # 2. Process the Entry
+    if target_order_id:
+        order = orders_db[target_order_id]
+        user_lang = users_db.get(user_id, {}).get('lang', 'en')
+
+        # Let them in!
+        await request.approve()
+
+        # 3. Calculate time and Start the Clock!
+        plan_name = order.get('plan_name', 'Premium Plan')
+        plan_duration_str = "Lifetime"
+        time_delta = None
+
+        for p in plans_db.values():
+            if p['name'] == plan_name:
+                plan_duration_str = p.get('duration', 'Lifetime')
+                time_delta = parse_plan_duration(plan_duration_str)
+                break
+
+        orders_db[target_order_id]['status'] = 'active'
+        orders_db[target_order_id]['joined_at'] = datetime.now().isoformat()
+
+        if time_delta:
+            expiry_date = datetime.now() + time_delta
+            orders_db[target_order_id]['expires_at'] = expiry_date.isoformat()
+            
+            if context.job_queue:
+                context.job_queue.run_once(
+                    auto_expire_task, 
+                    when=time_delta, 
+                    data={'user_id': int(user_id), 'order_id': target_order_id},
+                    name=f"auto_expire_{target_order_id}"
+                )
+                logger.info(f"⏰ Timer STARTED! User {user_id} entered. Order {target_order_id} will expire at {expiry_date.strftime('%I:%M %p')}")
+        else:
+            orders_db[target_order_id]['expires_at'] = "Lifetime"
+
+        save_db(ORDERS_FILE, orders_db)
+
+        # Send Welcome Message
+        welcome_text = f"✅ <b>Access Granted!</b>\n\nYou have successfully joined the premium channel! Your time (<b>{plan_duration_str}</b>) starts EXACTLY NOW. Enjoy!"
+        final_welcome = await smart_translate(welcome_text, user_lang)
+        try:
+            await context.bot.send_message(chat_id=user_id, text=final_welcome, parse_mode='HTML')
+        except Exception: pass
+
+    else:
+        # Slam the door on freeloaders/ghosts
+        await request.decline()
+        user_lang = users_db.get(user_id, {}).get('lang', 'en')
+        deny_text = "❌ <b>Access Denied:</b> You do not have an active premium ticket. Please purchase a plan via the bot first!"
+        final_deny = await smart_translate(deny_text, user_lang)
+        try:
+            await context.bot.send_message(chat_id=user_id, text=final_deny, parse_mode='HTML')
+        except Exception: pass    
+
+async def restore_timers(context: ContextTypes.DEFAULT_TYPE):
+    """Wakes up on bot restart, reads the DB, and restores all RAM timers!"""
+    now = datetime.now()
+    restored_count = 0
+    expired_count = 0
+    
+    logger.info("🔄 Initiating Timer Recovery System...")
+    
+    for order_id, order in orders_db.items():
+        if order.get('status') == 'active':
+            expires_at_str = order.get('expires_at')
+            
+            # Skip lifetime plans
+            if not expires_at_str or expires_at_str == "Lifetime":
+                continue
+                
+            try:
+                expires_at = datetime.fromisoformat(expires_at_str)
+                user_id = order.get('user_id')
+                
+                # Calculate how many seconds are left
+                seconds_left = (expires_at - now).total_seconds()
+                
+                if seconds_left <= 0:
+                    # The user expired while the bot was turned off! Kick them immediately.
+                    context.job_queue.run_once(
+                        auto_expire_task,
+                        when=1, # Run in 1 second
+                        data={'user_id': user_id, 'order_id': order_id},
+                        name=f"auto_expire_{order_id}"
+                    )
+                    expired_count += 1
+                else:
+                    # The user still has time. Reschedule the timer.
+                    context.job_queue.run_once(
+                        auto_expire_task,
+                        when=seconds_left,
+                        data={'user_id': user_id, 'order_id': order_id},
+                        name=f"auto_expire_{order_id}"
+                    )
+                    restored_count += 1
+            except Exception as e:
+                logger.error(f"Error restoring timer for {order_id}: {e}")
+                
+    logger.info(f"✅ Timer Recovery Complete: {restored_count} timers restored, {expired_count} executed immediately.")
 
 async def handle_deck_action(update: Update, context: ContextTypes.DEFAULT_TYPE, order_id: str, action: str):
     query = update.callback_query
@@ -2604,7 +2705,7 @@ def main():
     print("="*70 + "\n")
     
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-    
+    application.job_queue.run_once(restore_timers, when=2)
     # User handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(button_callback))
@@ -2630,6 +2731,7 @@ def main():
     application.add_handler(CommandHandler("adminlist", admin_list))
 
     application.add_error_handler(error_handler)
+    application.add_handler(ChatJoinRequestHandler(handle_join_request))
     
     logger.info("✅ Semi-Auto Bot Started!")
     logger.info(f"🔒 Mode: Manual Approval")
