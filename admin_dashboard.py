@@ -6,7 +6,7 @@ from database import (
     save_db, ORDERS_FILE, MEMBERS_FILE, INVITE_LINKS_FILE,SETTINGS_FILE,
     mongo_client, mongo_db
 )
-from config import TELEGRAM_BOT_TOKEN, ADMIN_CHAT_ID
+from config import TELEGRAM_BOT_TOKEN, ADMIN_CHAT_ID, MONGO_URI
 from api_utils import send_colored_settings, send_colored_photo
 async def show_bot_stats(query, context):
     """Generates the advanced HTML Stats Dashboard"""
@@ -45,6 +45,7 @@ async def show_bot_stats(query, context):
 
     net_razorpay = razorpay_revenue * 0.98
     net_revenue = upi_revenue + net_razorpay
+    storage_type = "MongoDB (Persistent) 🟢" if MONGO_URI else "Local JSON (SERVER STORAGE) 🟡"
 
     msg = f"""📊 <b>BOT STATISTICS DASHBOARD</b>
 
@@ -54,7 +55,7 @@ async def show_bot_stats(query, context):
 💰 <b>Net Revenue:</b> ₹{net_revenue:.2f}
 👥 <b>Members:</b> {len(unique_members)}
 🔗 <b>Active Links:</b> {active_links}
-🗄️ <b>Storage Mode:</b> Manual (JSON)</blockquote>
+🗄️ <b>Storage Mode:</b> {storage_type}</blockquote>
 
 <i>*Note: GST is not included. Final prices may differ due to GST charges on Razorpay revenue.</i>"""
 
